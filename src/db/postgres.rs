@@ -49,6 +49,10 @@ pub struct Session {
     /// (and its session settings) never get in the way of browsing.
     editor: Mutex<Option<Client>>,
     editor_cancel: std::sync::Mutex<Option<CancelToken>>,
+    /// The agent's connection, opened on first use. Its queries always run in
+    /// a read-only transaction that is rolled back.
+    agent: Mutex<Option<Client>>,
+    agent_cancel: std::sync::Mutex<Option<CancelToken>>,
 }
 
 /// What a statement from the editor produced.
@@ -124,6 +128,20 @@ JOIN pg_class tc ON tc.oid = c.confrelid JOIN pg_namespace tn ON tn.oid = tc.rel
 WHERE c.contype = 'f' AND $1::text::regclass IN (c.conrelid, c.confrelid)
 ORDER BY sc.relname, tc.relname, c.conname";
 
+/// Every foreign key, as (schema, table, columns, referenced schema, table, columns).
+const ALL_LINKS_SQL: &str = "
+SELECT sn.nspname::text, sc.relname::text,
+  ARRAY(SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY k(n, ord)
+        JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.n ORDER BY k.ord),
+  tn.nspname::text, tc.relname::text,
+  ARRAY(SELECT a.attname::text FROM unnest(c.confkey) WITH ORDINALITY k(n, ord)
+        JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = k.n ORDER BY k.ord)
+FROM pg_constraint c
+JOIN pg_class sc ON sc.oid = c.conrelid JOIN pg_namespace sn ON sn.oid = sc.relnamespace
+JOIN pg_class tc ON tc.oid = c.confrelid JOIN pg_namespace tn ON tn.oid = tc.relnamespace
+WHERE c.contype = 'f' AND sn.nspname <> 'information_schema' AND sn.nspname NOT LIKE 'pg\\_%'
+ORDER BY sn.nspname, sc.relname, c.conname";
+
 const DATABASES_SQL: &str = "
 SELECT datname::text FROM pg_database
 WHERE datallowconn AND NOT datistemplate AND has_database_privilege(datname, 'CONNECT')
@@ -157,6 +175,8 @@ impl Session {
             target: target.clone(),
             editor: Mutex::new(None),
             editor_cancel: std::sync::Mutex::new(None),
+            agent: Mutex::new(None),
+            agent_cancel: std::sync::Mutex::new(None),
         })
     }
 
@@ -191,6 +211,19 @@ impl Session {
             columns.entry((row.get(0), row.get(1))).or_default().push((row.get(2), row.get(3)));
         }
         Ok(columns)
+    }
+
+    /// Every foreign key in the database, for describing it to the agent.
+    pub async fn all_links(&self) -> Result<Vec<(String, String, Link)>, String> {
+        let rows = self.client.query(ALL_LINKS_SQL, &[]).await.map_err(|e| describe(&e))?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let link =
+                    Link { schema: row.get(3), table: row.get(4), columns: row.get(2), other_columns: row.get(5) };
+                (row.get(0), row.get(1), link)
+            })
+            .collect())
     }
 
     pub async fn databases(&self) -> Result<Vec<String>, String> {
@@ -338,11 +371,52 @@ impl Session {
         }
         // Taken out first: the lock must not be held across the query.
         let cancel = self.editor_cancel.lock().unwrap().clone();
-        let result = collect(client, sql, cancel, self.verify_tls).await;
+        let result = collect(client, sql, RESULT_LIMIT, cancel, self.verify_tls).await;
         if allow_writes {
             let end = if result.is_ok() { "COMMIT" } else { "ROLLBACK" };
             client.batch_execute(end).await.map_err(|e| run_error(&e))?;
         }
+        let (rows, affected, truncated) = result?;
+        Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed() })
+    }
+
+    /// Runs one statement for the agent: a single statement only (preparing
+    /// it rejects several), inside a read-only transaction that is always
+    /// rolled back, so not even session settings survive it. Keeps up to `limit` rows.
+    pub async fn peek(&self, sql: &str, limit: usize) -> Result<Outcome, RunError> {
+        let mut guard = self.agent.lock().await;
+        if guard.is_none() {
+            let (client, _) = open(&self.target).await.map_err(|e| RunError {
+                message: e.message,
+                needs_write: false,
+                canceled: false,
+            })?;
+            client
+                .batch_execute("SET default_transaction_read_only = on; SET statement_timeout = '30s'")
+                .await
+                .map_err(|e| run_error(&e))?;
+            *self.agent_cancel.lock().unwrap() = Some(client.cancel_token());
+            *guard = Some(client);
+        }
+        let client = guard.as_ref().expect("opened above");
+        let started = Instant::now();
+        let statement = client.prepare(sql).await.map_err(|e| run_error(&e))?;
+        let columns = (!statement.columns().is_empty()).then(|| {
+            statement
+                .columns()
+                .iter()
+                .map(|c| Column {
+                    name: c.name().to_owned(),
+                    type_name: sql_type_name(c.type_()),
+                    kind: kind_of_type(c.type_()),
+                    primary_key: false,
+                })
+                .collect::<Vec<_>>()
+        });
+        client.batch_execute("BEGIN READ ONLY").await.map_err(|e| run_error(&e))?;
+        let cancel = self.agent_cancel.lock().unwrap().clone();
+        let result = collect(client, sql, limit, cancel, self.verify_tls).await;
+        client.batch_execute("ROLLBACK").await.map_err(|e| run_error(&e))?;
         let (rows, affected, truncated) = result?;
         Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed() })
     }
@@ -363,10 +437,11 @@ impl Session {
     }
 }
 
-/// Streams a statement's rows, stopping the query once `RESULT_LIMIT` rows are in.
+/// Streams a statement's rows, stopping the query once `limit` rows are in.
 async fn collect(
     client: &Client,
     sql: &str,
+    limit: usize,
     cancel: Option<CancelToken>,
     verify_tls: bool,
 ) -> Result<(Vec<Row>, u64, bool), RunError> {
@@ -376,7 +451,7 @@ async fn collect(
     while let Some(message) = stream.next().await {
         match message {
             Ok(SimpleQueryMessage::Row(row)) => {
-                if rows.len() == RESULT_LIMIT {
+                if rows.len() == limit {
                     truncated = true;
                     if let (Some(token), Ok(tls)) = (&cancel, tls(verify_tls)) {
                         let _ = token.cancel_query(tls).await;
@@ -582,6 +657,24 @@ pub fn describe(e: &tokio_postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Needs the fixture database: `createdb scarlet_dev && psql -d scarlet_dev -f dev/seed.sql`.
+    #[tokio::test]
+    #[ignore]
+    async fn agent_queries_cannot_change_anything() {
+        let target = Target::parse("scarlet_dev", crate::connect::Source::Argument).unwrap();
+        let session = Session::connect(&target, |_| {}).await.unwrap();
+        let count = "SELECT count(*) FROM orders";
+        let before = session.peek(count, 1).await.unwrap().rows;
+
+        assert!(session.peek("SELECT 1; DELETE FROM orders", 10).await.is_err());
+        assert!(session.peek("WITH gone AS (DELETE FROM orders RETURNING 1) SELECT 1", 10).await.is_err());
+        // A statement that switches writes back on is undone with its transaction.
+        session.peek("SELECT set_config('default_transaction_read_only', 'off', false)", 1).await.unwrap();
+        assert!(session.peek("WITH gone AS (DELETE FROM orders RETURNING 1) SELECT 1", 10).await.is_err());
+
+        assert_eq!(session.peek(count, 1).await.unwrap().rows, before);
+    }
 
     fn column(kind: ValueKind, type_name: &str) -> Column {
         Column { name: "c".into(), type_name: type_name.into(), kind, primary_key: false }

@@ -1,6 +1,7 @@
 //! Drawing. Each component owns its view state and renders itself; this module
 //! lays them out.
 
+pub mod ask;
 pub mod connect;
 pub mod editor;
 pub mod fuzzy;
@@ -8,6 +9,7 @@ pub mod grid;
 pub mod help;
 pub mod input;
 pub mod list;
+pub mod logo;
 pub mod menu;
 pub mod palette;
 pub mod row;
@@ -29,6 +31,9 @@ use crate::{
     sql::{self, TokenKind},
 };
 
+/// Rows from the top of the wordmark to the dialog below it.
+const LOGO_SPACE: u16 = logo::HEIGHT + 2;
+
 pub fn render(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     if area.width < 40 || area.height < 8 {
@@ -40,6 +45,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let [body, footer] = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(area);
     let spinner = app.spinner();
 
+    // Before a connection is open, the wordmark sits above whatever is shown.
+    let start = app.workspace.is_none() && body.height >= 16 && body.width >= logo::width() + 4;
+    let below_logo =
+        if start { Rect { y: body.y + LOGO_SPACE, height: body.height - LOGO_SPACE, ..body } } else { body };
+    let logo_above = |frame: &mut Frame, rect: Rect| {
+        if start {
+            logo::render(frame, Rect { y: rect.y.saturating_sub(LOGO_SPACE), height: logo::HEIGHT, ..body });
+        }
+    };
+
     if let Some(workspace) = &mut app.workspace {
         render_workspace(frame, body, workspace, spinner);
     } else if let Some(connecting) = &app.connecting
@@ -48,8 +63,9 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         let target = &connecting.target;
         let message = format!("{spinner} Connecting to {} on {}", target.database(), target.address());
         let message = text::fit(&message, body.width as usize - 4);
-        let rect = text::centered(body, text::measure(&message, 999) as u16, 1);
+        let rect = text::centered(below_logo, text::measure(&message, 999) as u16, 1);
         frame.buffer_mut().set_string(rect.x, rect.y, message, theme::muted());
+        logo_above(frame, rect);
     }
 
     if app.overlay.is_some() && app.workspace.is_some() {
@@ -60,9 +76,14 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match &mut app.overlay {
         Some(Overlay::Connect(picker)) => {
             let activity = connect::Activity { discovering: app.discovering, connecting, spinner };
-            picker.render(frame, body, activity);
+            let rect = picker.render(frame, below_logo, activity);
+            logo_above(frame, rect);
         }
-        Some(Overlay::Password(prompt)) => prompt.render(frame, body, connecting.is_some(), spinner),
+        Some(Overlay::Password(prompt)) => {
+            let rect = prompt.render(frame, below_logo, connecting.is_some(), spinner);
+            logo_above(frame, rect);
+        }
+        Some(Overlay::Ask(prompt)) => prompt.render(frame, body),
         Some(Overlay::Palette(palette)) => palette.render(frame, body),
         Some(Overlay::Value(view)) => view.render(frame, body),
         Some(Overlay::Row(view)) => view.render(frame, body),
@@ -104,7 +125,21 @@ fn render_query(frame: &mut Frame, area: Rect, ws: &mut Workspace, spinner: &str
 
     // The result first: the editor's completion popup may overlap it.
     let focused = ws.focus == Focus::Grid;
+    if let RunState::Asking { question, activity, .. } = &ws.run {
+        let block = empty_block("Result", focused);
+        let inner = block.inner(bottom);
+        frame.render_widget(block, bottom);
+        let width = inner.width.saturating_sub(2) as usize;
+        let mut lines: Vec<(String, Style)> =
+            text::wrap(question, width).into_iter().map(|line| (line, theme::strong())).collect();
+        lines.push((String::new(), Style::new()));
+        lines.push((text::fit(&format!("{spinner} {activity}"), width), theme::muted()));
+        for (i, (line, style)) in lines.into_iter().enumerate().take(inner.height as usize) {
+            frame.buffer_mut().set_string(inner.x + 1, inner.y + i as u16, line, style);
+        }
+    }
     let message = match &ws.run {
+        RunState::Asking { .. } => None,
         RunState::Running { .. } => Some((format!("{spinner} Running"), theme::muted())),
         RunState::Failed(error) => Some((error.clone(), theme::error())),
         RunState::Done(message) => Some((message.clone(), Style::new())),
@@ -117,6 +152,7 @@ fn render_query(frame: &mut Frame, area: Rect, ws: &mut Workspace, spinner: &str
         RunState::Idle => None,
     };
     match (message, &mut ws.result) {
+        _ if matches!(ws.run, RunState::Asking { .. }) => {}
         (None, Some(grid)) => grid.render(frame, bottom, focused, spinner),
         (message, _) => {
             let block = empty_block("Result", focused);

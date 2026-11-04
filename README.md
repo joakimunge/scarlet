@@ -46,6 +46,7 @@ everything you can do where you are, and `?` lists every key.
 | `v` | the whole row, vertically |
 | `c` `y` / `Y` | copy the value / the row as JSON |
 | `r` | reload |
+| `a` | ask about the data in plain words |
 | `ctrl+k` | jump to any table or run a command |
 | `q`, `ctrl+c` | quit |
 
@@ -65,6 +66,25 @@ were browsing, already written as SQL with its filter and sort.
 - `ctrl+o` opens the text in `$SCARLET_EDITOR`, `$VISUAL` or `$EDITOR`, and takes it back when you quit.
 - The editor's text is kept per database between sessions.
 
+### Ask
+
+`a` asks about the data in plain words: "which countries have the most VIP customers". Claude reads the
+schema, tries a few small queries to see what the values look like, then shows its answer as rows, with
+the SQL added to the editor under your question so you can change it and run it again.
+
+- The next question follows on from the last one ("only the Nordic ones"). `ctrl+n` in the question
+  box starts over.
+- Claude can only read. Its queries run one statement at a time in a transaction that is always rolled
+  back, on a connection of its own.
+- It runs Claude Code headless, signed in as you, with none of your own settings, plugins or tools.
+  Set `SCARLET_MODEL` to pick another model (default: `sonnet`). `esc` stops it.
+
+`scarlet mcp` serves the same read-only tools to any MCP client. To use a database from Claude Code:
+
+```sh
+claude mcp add scarlet -- scarlet mcp postgres://localhost/shop
+```
+
 ### Your vim keys
 
 If you use Neovim (LazyVim and friends included) or Vim, Scarlet asks your editor for its normal-mode
@@ -74,8 +94,10 @@ If lazy.nvim has plugins it would need to install, Scarlet skips this rather tha
 
 ## Look
 
-Scarlet draws only with your terminal's own colours: its foreground, background and ANSI palette.
-It matches whatever theme you use. `NO_COLOR` is respected.
+Scarlet draws with your terminal's own colours: its foreground, background and ANSI palette, so it
+matches whatever theme you use. The one exception is the wordmark on the start screen, which is
+always scarlet (a smooth sweep where `COLORTERM` says 24-bit colour, whole-letter steps otherwise).
+`NO_COLOR` is respected.
 
 ## Development
 

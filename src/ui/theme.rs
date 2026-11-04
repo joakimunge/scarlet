@@ -63,3 +63,28 @@ pub fn number() -> Style {
 pub fn comment() -> Style {
     muted().add_modifier(Modifier::ITALIC)
 }
+
+pub fn truecolor() -> bool {
+    static TRUECOLOR: OnceLock<bool> = OnceLock::new();
+    *TRUECOLOR.get_or_init(|| std::env::var("COLORTERM").is_ok_and(|v| v == "truecolor" || v == "24bit"))
+}
+
+/// The one colour Scarlet brings itself, for its wordmark: a sweep from deep
+/// crimson through scarlet, `along` running from 0 to 1. Terminals without
+/// 24-bit colour get the nearest steps of the 256-colour palette.
+pub fn scarlet(along: f32) -> Color {
+    if no_color() {
+        return Color::Reset;
+    }
+    let along = along.clamp(0.0, 1.0);
+    if truecolor() {
+        let mix = |from: f32, to: f32| (from + (to - from) * along).round() as u8;
+        Color::Rgb(mix(214.0, 255.0), mix(10.0, 60.0), mix(40.0, 0.0))
+    } else {
+        Color::Indexed(match along {
+            a if a < 0.34 => 160,
+            a if a < 0.67 => 196,
+            _ => 202,
+        })
+    }
+}

@@ -383,7 +383,10 @@ impl Editor {
             self.scroll_row = self.row + 1 - self.viewport;
         }
         let cursor_x = display_width(&self.lines[self.row][..self.col]);
-        if cursor_x < self.scroll_col {
+        // Scrolled sideways only while the cursor would be out of sight otherwise.
+        if cursor_x < text_width {
+            self.scroll_col = 0;
+        } else if cursor_x < self.scroll_col {
             self.scroll_col = cursor_x;
         } else if text_width > 0 && cursor_x >= self.scroll_col + text_width {
             self.scroll_col = cursor_x + 1 - text_width;

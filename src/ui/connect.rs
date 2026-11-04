@@ -43,7 +43,8 @@ impl ConnectPicker {
         (is_url(text) || text.contains("host=") || text.contains("dbname=")).then_some(text)
     }
 
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, activity: Activity) {
+    /// Draws the picker and returns where it went.
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, activity: Activity) -> Rect {
         let width = area.width.saturating_sub(4).min(84);
         let status = self.status_lines(width.saturating_sub(4) as usize, &activity);
         // Sized by everything there is, not what matches, so the box stays put while typing.
@@ -59,7 +60,7 @@ impl ConnectPicker {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         if inner.height < 3 {
-            return;
+            return rect;
         }
 
         frame.buffer_mut().set_string(inner.x + 1, inner.y, "›", theme::accent());
@@ -86,6 +87,7 @@ impl ConnectPicker {
         for (i, (line, style)) in status.iter().take(status_height as usize).enumerate() {
             frame.buffer_mut().set_string(inner.x + 1, status_y + i as u16, line, *style);
         }
+        rect
     }
 
     fn status_lines(&self, width: usize, activity: &Activity) -> Vec<(String, ratatui::style::Style)> {
@@ -118,7 +120,8 @@ pub struct PasswordPrompt {
 }
 
 impl PasswordPrompt {
-    pub fn render(&mut self, frame: &mut Frame, area: Rect, connecting: bool, spinner: &str) {
+    /// Draws the prompt and returns where it went.
+    pub fn render(&mut self, frame: &mut Frame, area: Rect, connecting: bool, spinner: &str) -> Rect {
         let width = area.width.saturating_sub(4).min(60);
         let error = self.error.as_deref().map(|e| text::wrap(e, width.saturating_sub(4) as usize)).unwrap_or_default();
         let height = (5 + error.len().min(3) as u16).min(area.height);
@@ -131,7 +134,7 @@ impl PasswordPrompt {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         if inner.height < 3 {
-            return;
+            return rect;
         }
         let place = format!("{} on {}", self.target.database(), self.target.address());
         let buf = frame.buffer_mut();
@@ -149,5 +152,6 @@ impl PasswordPrompt {
                 frame.buffer_mut().set_string(inner.x + 1, y, line, theme::error());
             }
         }
+        rect
     }
 }

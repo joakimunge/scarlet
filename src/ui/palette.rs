@@ -19,6 +19,7 @@ pub enum Action {
     Database(String),
     SwitchConnection,
     Query,
+    Ask,
     Reload,
     Help,
     Quit,

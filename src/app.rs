@@ -22,7 +22,7 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{
-    complete,
+    agent, complete,
     connect::{Source, Target, discover},
     db::{
         Filter, Link, Relation, RelationKind, Row, Schema, TableInfo, View, ident, looks_like_condition,
@@ -32,6 +32,7 @@ use crate::{
     scratch, sql,
     ui::{
         self,
+        ask::AskPrompt,
         connect::{ConnectPicker, PasswordPrompt},
         editor::{self, Editor},
         grid::{self, Grid, PAGE_SIZE},
@@ -74,6 +75,7 @@ pub enum Msg {
     VimKeys(Option<VimKeys>),
     Columns { session: u64, columns: HashMap<(String, String), Vec<(String, String)>> },
     QueryDone { session: u64, id: u64, sql: String, result: Result<Outcome, RunError> },
+    Agent { session: u64, id: u64, event: agent::Event },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -96,6 +98,12 @@ pub enum RunState {
     Running {
         id: u64,
     },
+    /// The agent is working on a question.
+    Asking {
+        id: u64,
+        question: String,
+        activity: String,
+    },
     /// Finished without rows to show, e.g. "3 rows changed".
     Done(String),
     Failed(String),
@@ -106,6 +114,7 @@ pub enum RunState {
 pub enum Overlay {
     Connect(ConnectPicker),
     Password(PasswordPrompt),
+    Ask(AskPrompt),
     Palette(Palette),
     Value(ValueView),
     Row(RowView),
@@ -152,6 +161,10 @@ pub struct Workspace {
     last_sql: Option<String>,
     /// Every column by (schema, table), for completion.
     pub columns: HashMap<(String, String), Vec<(String, String)>>,
+    /// The agent answering the latest question, while it runs.
+    agent: Option<tokio::task::JoinHandle<()>>,
+    /// The conversation follow-up questions continue.
+    conversation: Option<String>,
 }
 
 impl Workspace {
@@ -399,7 +412,7 @@ impl App {
                 ws.catalog_pending
                     || !ws.tree.loaded
                     || ws.table.as_ref().is_some_and(Grid::is_busy)
-                    || matches!(ws.run, RunState::Running { .. })
+                    || matches!(ws.run, RunState::Running { .. } | RunState::Asking { .. })
             })
     }
 
@@ -659,6 +672,8 @@ impl App {
                     run: RunState::Idle,
                     last_sql: None,
                     columns: HashMap::new(),
+                    agent: None,
+                    conversation: None,
                 });
                 self.load_catalog();
                 self.load_databases();
@@ -746,6 +761,7 @@ impl App {
                 }
             }
             Msg::QueryDone { session, id, sql, result } => self.query_done(session, id, sql, result),
+            Msg::Agent { session, id, event } => self.agent_event(session, id, event),
             Msg::Counted { generation, result } => {
                 // A failed count (timeout) just leaves the estimate in place.
                 if let (Some(grid), Ok(n)) = (self.current_grid(generation), result) {
@@ -796,6 +812,7 @@ impl App {
                 picker.refilter(&self.targets, None);
             }
             Some(Overlay::Password(prompt)) => prompt.input.insert_str(text),
+            Some(Overlay::Ask(prompt)) => prompt.input.insert_str(text),
             Some(Overlay::Palette(palette)) => {
                 palette.list.input.insert_str(text);
                 palette.refilter();
@@ -842,6 +859,10 @@ impl App {
             self.toggle_query();
             return;
         }
+        if key.code == KeyCode::Esc && matches!(ws.run, RunState::Asking { .. }) {
+            self.stop_asking();
+            return;
+        }
         if ws.focus == Focus::Editor {
             self.editor_key(key);
             return;
@@ -862,6 +883,7 @@ impl App {
         match key.code {
             _ if is_ctrl(key, 'k') => self.open_palette(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
+            KeyCode::Char('a') => self.open_ask(),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab | KeyCode::BackTab => {
                 // Tables, then the editor in query mode, then the data.
@@ -997,6 +1019,28 @@ impl App {
                     }
                 }
                 Some(Overlay::Connect(picker))
+            }
+            Overlay::Ask(mut prompt) => {
+                match key.code {
+                    KeyCode::Esc => return None,
+                    KeyCode::Enter => {
+                        let question = prompt.input.text.trim().to_owned();
+                        if !question.is_empty() {
+                            self.ask(question);
+                            return None;
+                        }
+                    }
+                    _ if is_ctrl(key, 'n') && prompt.follow_up => {
+                        if let Some(ws) = &mut self.workspace {
+                            ws.conversation = None;
+                        }
+                        prompt.follow_up = false;
+                    }
+                    _ => {
+                        prompt.input.handle(key);
+                    }
+                }
+                Some(Overlay::Ask(prompt))
             }
             Overlay::Password(mut prompt) => {
                 match key.code {
@@ -1352,6 +1396,7 @@ impl App {
                 ("r".into(), "reload the list".into()),
             ],
         };
+        items.push(("a".into(), "ask about the data".into()));
         items.push(("ctrl+k".into(), "jump anywhere".into()));
         items.push(("?".into(), "every key".into()));
         let title = match (ws.focus, ws.grid()) {
@@ -1435,6 +1480,7 @@ impl App {
             KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => self.update_completion(true),
             KeyCode::Esc => match ws.run {
                 RunState::Running { .. } => self.cancel_query(),
+                RunState::Asking { .. } => self.stop_asking(),
                 RunState::NeedsWrite(_) => ws.run = RunState::Idle,
                 _ => ws.focus = if ws.result.is_some() { Focus::Grid } else { Focus::Tree },
             },
@@ -1501,6 +1547,146 @@ impl App {
         let Some(ws) = &self.workspace else { return };
         let session = ws.session.clone();
         tokio::spawn(async move { session.cancel_editor().await });
+    }
+
+    // ---- asking -------------------------------------------------------------
+
+    fn open_ask(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let prompt = AskPrompt {
+            input: Input::default(),
+            follow_up: ws.conversation.is_some(),
+            database: ws.target.database().to_owned(),
+        };
+        self.overlay = Some(Overlay::Ask(prompt));
+    }
+
+    /// Hands `question` to the agent. Its answer lands in the editor with its rows below.
+    fn ask(&mut self, question: String) {
+        let id = self.next_id();
+        let context = self.ask_context();
+        let Some(ws) = &mut self.workspace else { return };
+        if let Some(previous) = ws.agent.take() {
+            previous.abort();
+        }
+        let target = &ws.target;
+        ws.editor.get_or_insert_with(|| Editor::new(&scratch::load(target)));
+        ws.mode = Mode::Query;
+        ws.focus = Focus::Editor;
+        ws.run = RunState::Asking { id, question: question.clone(), activity: "Starting".into() };
+        let request = agent::Request {
+            question,
+            context,
+            conversation: ws.conversation.clone(),
+            database: ws.target.database().to_owned(),
+        };
+        let (tx, workspace) = (self.tx.clone(), ws.id);
+        let (handle, conversation) = agent::spawn(ws.session.clone(), request, move |event| {
+            let _ = tx.send(Msg::Agent { session: workspace, id, event });
+        });
+        ws.agent = Some(handle);
+        ws.conversation = Some(conversation);
+    }
+
+    /// What the user is looking at, in words, so a question can say "these".
+    fn ask_context(&self) -> Option<String> {
+        let ws = self.workspace.as_ref()?;
+        let grid = ws.grid()?;
+        let mut context = match ws.mode {
+            Mode::Browse => {
+                let mut text = format!("The user is looking at {}.{}", grid.relation.schema, grid.relation.name);
+                match grid.view.filter() {
+                    crate::db::Filter::All => {}
+                    crate::db::Filter::Search(words) => text.push_str(&format!(", searching for \"{words}\"")),
+                    crate::db::Filter::Condition(condition) => text.push_str(&format!(" where {condition}")),
+                }
+                if let Some(sort) = &grid.view.sort {
+                    let direction = if sort.descending { "descending" } else { "ascending" };
+                    text.push_str(&format!(", sorted by {} {direction}", sort.column));
+                }
+                text.push('.');
+                text
+            }
+            Mode::Query => format!("The user is looking at the result of:\n{}", ws.last_sql.as_deref()?),
+        };
+        if let Some(row) = grid.row_json() {
+            let row: String = row.chars().take(2000).collect();
+            context.push_str(&format!("\nThe row under their cursor: {row}"));
+        }
+        Some(context)
+    }
+
+    fn stop_asking(&mut self) {
+        let Some(ws) = &mut self.workspace else { return };
+        if let Some(agent) = ws.agent.take() {
+            agent.abort();
+        }
+        ws.run = RunState::Done("Stopped".into());
+    }
+
+    fn agent_event(&mut self, session: u64, id: u64, event: agent::Event) {
+        let generation = self.next_id();
+        let Some(ws) = self.workspace.as_mut().filter(|ws| ws.id == session) else { return };
+        let asking = matches!(&ws.run, RunState::Asking { id: asking, .. } if *asking == id);
+        match event {
+            agent::Event::Activity(text) => {
+                if let RunState::Asking { id: asking, activity, .. } = &mut ws.run
+                    && *asking == id
+                {
+                    *activity = text;
+                }
+            }
+            agent::Event::Answer { sql, title, outcome } => {
+                let RunState::Asking { question, .. } = &ws.run else { return };
+                if !asking {
+                    return;
+                }
+                let comment: String = question.lines().map(|l| format!("-- {l}\n")).collect();
+                if let Some(editor) = &mut ws.editor {
+                    let text = editor.text();
+                    let end = text.len();
+                    let gap = if editor.is_blank() || text.ends_with("\n\n") {
+                        ""
+                    } else if text.ends_with('\n') {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    };
+                    let start = if editor.is_blank() { 0 } else { end };
+                    editor.replace(start..end, &format!("{gap}{comment}{sql};"));
+                }
+                let count = outcome.rows.len() as u64;
+                let rows = if count == 1 { "row" } else { "rows" };
+                let size = if outcome.truncated {
+                    format!("first {} {rows}", text::thousands(count))
+                } else {
+                    format!("{} {rows}", text::thousands(count))
+                };
+                let note = if title.is_empty() { size } else { format!("{title} · {size}") };
+                let columns = outcome.columns.unwrap_or_default();
+                ws.result = Some(Grid::from_rows(columns, outcome.rows, note, generation));
+                ws.last_sql = Some(sql);
+                ws.run = RunState::Idle;
+                ws.focus = Focus::Grid;
+                self.save_scratch();
+            }
+            agent::Event::Finished { text } => {
+                ws.agent = None;
+                if asking {
+                    // No rows: the agent explains why.
+                    let text = if text.is_empty() { "No answer came back.".to_owned() } else { text };
+                    ws.run = RunState::Done(text);
+                }
+            }
+            agent::Event::Failed(error) => {
+                ws.agent = None;
+                if asking {
+                    ws.run = RunState::Failed(error);
+                } else if !error.is_empty() {
+                    self.toast(ToastKind::Error, error);
+                }
+            }
+        }
     }
 
     fn query_done(&mut self, session: u64, id: u64, sql: String, result: std::result::Result<Outcome, RunError>) {
@@ -1604,6 +1790,7 @@ impl App {
             });
         }
         let actions = [
+            ("Ask about the data", "a", Action::Ask),
             ("SQL editor", "ctrl+e", Action::Query),
             ("Switch connection", "", Action::SwitchConnection),
             ("Reload tables", "", Action::Reload),
@@ -1636,6 +1823,7 @@ impl App {
             }
             Action::Follow(relation, view) => self.open_linked(relation, view),
             Action::Query => self.toggle_query(),
+            Action::Ask => self.open_ask(),
             Action::Reload => self.load_catalog(),
             Action::Help => self.overlay = Some(Overlay::Help),
             Action::Quit => self.quit = true,
@@ -1653,6 +1841,10 @@ impl App {
                 return pairs(&[("↑↓", "select"), ("enter", "connect"), ("esc", close)]);
             }
             Some(Overlay::Password(_)) => return pairs(&[("enter", "connect"), ("esc", "back")]),
+            Some(Overlay::Ask(prompt)) if prompt.follow_up => {
+                return pairs(&[("enter", "ask"), ("ctrl+n", "new conversation"), ("esc", "close")]);
+            }
+            Some(Overlay::Ask(_)) => return pairs(&[("enter", "ask"), ("esc", "close")]),
             Some(Overlay::Palette(_)) => return pairs(&[("↑↓", "select"), ("enter", "go"), ("esc", "close")]),
             Some(Overlay::Value(_)) => return pairs(&[("↑↓", "scroll"), ("c", "copy"), ("esc", "close")]),
             Some(Overlay::Row(_)) => return pairs(&[("↑↓", "scroll"), ("Y", "copy as JSON"), ("esc", "close")]),
@@ -1661,6 +1853,9 @@ impl App {
         }
         let Some(ws) = &self.workspace else { return pairs(&[("q", "quit")]) };
         let leader = self.leader_label();
+        if matches!(ws.run, RunState::Asking { .. }) {
+            return pairs(&[("esc", "stop")]);
+        }
         if ws.focus == Focus::Editor {
             let popup = ws.editor.as_ref().is_some_and(|e| e.popup.is_some());
             return match &ws.run {
@@ -1681,14 +1876,20 @@ impl App {
             (Focus::Grid, Some(grid)) => {
                 let mut hints = pairs(&[("←↑↓→", "move")]);
                 hints.push(("enter".into(), self.enter_label(grid)));
-                hints.extend(pairs(&[("/", "filter"), ("s", "sort")]));
+                hints.extend(pairs(&[("/", "filter"), ("s", "sort"), ("a", "ask")]));
                 hints.push((leader, "more".into()));
                 hints.push(("esc".into(), self.escape_label(ws, grid).into()));
                 hints
             }
             _ => {
-                let mut hints =
-                    pairs(&[("↑↓", "move"), ("→", "open"), ("/", "filter"), ("ctrl+e", "sql"), ("ctrl+k", "jump")]);
+                let mut hints = pairs(&[
+                    ("↑↓", "move"),
+                    ("→", "open"),
+                    ("/", "filter"),
+                    ("a", "ask"),
+                    ("ctrl+e", "sql"),
+                    ("ctrl+k", "jump"),
+                ]);
                 hints.push((leader, "more".into()));
                 hints.extend(pairs(&[("q", "quit")]));
                 hints
