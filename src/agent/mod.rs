@@ -3,13 +3,14 @@
 //! through `scarlet mcp --bridge`, so the agent uses the session already open
 //! and never sees connection details. The answer arrives as SQL plus its rows.
 
+pub mod mask;
 pub mod mcp;
 pub mod tools;
 
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use serde_json::{Value, json};
@@ -20,6 +21,7 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 
+use self::mask::{Masker, Visibility};
 use crate::db::postgres::{Outcome, RESULT_LIMIT, Session};
 
 const SYSTEM_PROMPT: &str = "\
@@ -36,7 +38,10 @@ They ask in plain language; you find the data.
 - Names in the schema are shown unquoted. Quote identifiers with capitals, spaces or reserved words.
 - After show_result succeeds you are done: reply with just \"Done.\"
 - If this database cannot answer the question, do not call show_result; say why in a sentence or two.
-- Everything runs read-only. Never try to change data or settings.";
+- Everything runs read-only. Never try to change data or settings.
+- Values shown like ‹email 3› are personal data hidden from you. The same stand-in always means the \
+  same value, so you can count and group by them, but never put one in SQL; filter on other columns, or \
+  use the user's own words when they name a value.";
 
 /// The model Ask uses unless `SCARLET_MODEL` names another.
 const DEFAULT_MODEL: &str = "sonnet";
@@ -48,11 +53,16 @@ pub struct Request {
     /// The conversation to continue, as returned by an earlier `spawn`.
     pub conversation: Option<String>,
     pub database: String,
+    pub visibility: Visibility,
+    /// Shared across a conversation, so a value keeps its stand-in in follow-ups.
+    pub masker: Arc<Mutex<Masker>>,
 }
 
 pub enum Event {
     /// What the agent is doing now, for the progress line.
     Activity(String),
+    /// Text that left this computer for the agent: a heading and the text itself.
+    Sent(String, String),
     /// The query that answers the question, already run.
     Answer {
         sql: String,
@@ -103,11 +113,12 @@ async fn ask(
         prompt.push_str(&format!("{context}\n\n"));
     }
     prompt.push_str(&format!("Question: {}", request.question));
+    events(Event::Sent("Your question and its context".into(), prompt.clone()));
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let servers = json!({"mcpServers": {"scarlet": {
         "command": exe,
-        "args": ["mcp", "--bridge", socket.path],
+        "args": ["mcp", "--bridge", socket.path, "--values", request.visibility.key()],
     }}});
     let model = std::env::var("SCARLET_MODEL").ok().filter(|m| !m.trim().is_empty());
     let mut command = Command::new("claude");
@@ -147,7 +158,7 @@ async fn ask(
         tokio::select! {
             accepted = socket.listener.accept() => {
                 if let Ok((stream, _)) = accepted {
-                    bridges.spawn(bridge(stream, session.clone(), events.clone()));
+                    bridges.spawn(bridge(stream, session.clone(), request.visibility, request.masker.clone(), events.clone()));
                 }
             }
             line = stdout.next_line() => match line {
@@ -183,8 +194,14 @@ async fn ask(
     }
 }
 
-/// Answers one `scarlet mcp --bridge` process's tool calls.
-async fn bridge(stream: UnixStream, session: Arc<Session>, events: Arc<dyn Fn(Event) + Send + Sync>) {
+/// Answers one `scarlet mcp --bridge` process's tool calls, enforcing `visibility` here too.
+async fn bridge(
+    stream: UnixStream,
+    session: Arc<Session>,
+    visibility: Visibility,
+    masker: Arc<Mutex<Masker>>,
+    events: Arc<dyn Fn(Event) + Send + Sync>,
+) {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -195,8 +212,12 @@ async fn bridge(stream: UnixStream, session: Arc<Session>, events: Arc<dyn Fn(Ev
         let result = if name == tools::SHOW_RESULT {
             show_result(&session, arguments, &*events).await
         } else {
-            tools::call(&session, name, arguments).await
+            tools::call(&session, name, arguments, visibility, &masker).await
         };
+        let sent = match &result {
+            Ok(text) | Err(text) => text.clone(),
+        };
+        events(Event::Sent(tool_heading(name, arguments), sent));
         let reply = mcp::reply(result);
         if write.write_all(format!("{reply}\n").as_bytes()).await.is_err() {
             break;
@@ -216,9 +237,25 @@ async fn show_result(
     if outcome.columns.is_none() {
         return Err("show_result needs a statement that returns rows.".into());
     }
-    let preview = tools::rows_as_text(&outcome, 10);
+    // The rows stay here: the agent only learns that it worked.
+    let count = outcome.rows.len();
+    let columns: Vec<String> = outcome.columns.iter().flatten().map(|c| c.name.clone()).collect();
     events(Event::Answer { sql, title, outcome });
-    Ok(format!("Shown to the user. The first rows:\n{preview}"))
+    Ok(format!("Shown to the user: {count} rows with the columns {}.", columns.join(", ")))
+}
+
+/// How a tool call is labelled in the record of what was sent.
+fn tool_heading(name: &str, arguments: &Value) -> String {
+    match name {
+        "query" | tools::SHOW_RESULT => {
+            format!(
+                "{name}: {}",
+                arguments["sql"].as_str().unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        }
+        "describe_table" => format!("describe_table: {}", arguments["table"].as_str().unwrap_or_default()),
+        _ => name.to_owned(),
+    }
 }
 
 /// The bridge's listening socket, removed again when dropped.

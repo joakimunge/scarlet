@@ -8,12 +8,14 @@ use ratatui::{
 };
 
 use super::{input::Input, text, theme};
+use crate::agent::mask::Visibility;
 
 pub struct AskPrompt {
     pub input: Input,
     /// The question continues an earlier conversation.
     pub follow_up: bool,
     pub database: String,
+    pub visibility: Visibility,
 }
 
 impl AskPrompt {
@@ -37,7 +39,7 @@ impl AskPrompt {
         let note = if self.follow_up {
             "Follows on from your last question. ctrl+n starts over.".to_owned()
         } else {
-            format!("Claude reads {} and answers with a read-only query.", self.database)
+            self.visibility.summary(&self.database)
         };
         let note = text::fit(&note, inner.width.saturating_sub(2) as usize);
         buf.set_string(inner.x + 1, inner.y + 2, note, theme::muted());

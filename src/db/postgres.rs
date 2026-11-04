@@ -65,6 +65,9 @@ pub struct Outcome {
     /// More rows existed than were kept.
     pub truncated: bool,
     pub elapsed: Duration,
+    /// For each column that is a plain table column, that column's name
+    /// (`SELECT email AS x` gives `email`). Filled in for the agent only.
+    pub sources: Vec<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -377,7 +380,7 @@ impl Session {
             client.batch_execute(end).await.map_err(|e| run_error(&e))?;
         }
         let (rows, affected, truncated) = result?;
-        Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed() })
+        Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed(), sources: Vec::new() })
     }
 
     /// Runs one statement for the agent: a single statement only (preparing
@@ -413,12 +416,15 @@ impl Session {
                 })
                 .collect::<Vec<_>>()
         });
+        let origins: Vec<Option<(u32, i16)>> =
+            statement.columns().iter().map(|c| Some((c.table_oid()?, c.column_id()?))).collect();
+        let sources = source_names(client, &origins).await.map_err(|e| run_error(&e))?;
         client.batch_execute("BEGIN READ ONLY").await.map_err(|e| run_error(&e))?;
         let cancel = self.agent_cancel.lock().unwrap().clone();
         let result = collect(client, sql, limit, cancel, self.verify_tls).await;
         client.batch_execute("ROLLBACK").await.map_err(|e| run_error(&e))?;
         let (rows, affected, truncated) = result?;
-        Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed() })
+        Ok(Outcome { columns, rows, affected, truncated, elapsed: started.elapsed(), sources })
     }
 
     /// Stops the editor's running query, if any.
@@ -435,6 +441,28 @@ impl Session {
             let _ = self.cancel.cancel_query(tls).await;
         }
     }
+}
+
+/// The table column behind each result column, by (table oid, column number).
+async fn source_names(
+    client: &Client,
+    origins: &[Option<(u32, i16)>],
+) -> Result<Vec<Option<String>>, tokio_postgres::Error> {
+    let known: Vec<(u32, i16)> = origins.iter().flatten().copied().collect();
+    if known.is_empty() {
+        return Ok(vec![None; origins.len()]);
+    }
+    let tables: Vec<u32> = known.iter().map(|(t, _)| *t).collect();
+    let numbers: Vec<i16> = known.iter().map(|(_, n)| *n).collect();
+    let rows = client
+        .query(
+            "SELECT o.t, o.n, a.attname::text FROM unnest($1::oid[], $2::int2[]) AS o(t, n) \
+             JOIN pg_attribute a ON a.attrelid = o.t AND a.attnum = o.n",
+            &[&tables, &numbers],
+        )
+        .await?;
+    let names: HashMap<(u32, i16), String> = rows.iter().map(|r| ((r.get(0), r.get(1)), r.get(2))).collect();
+    Ok(origins.iter().map(|origin| origin.and_then(|key| names.get(&key).cloned())).collect())
 }
 
 /// Streams a statement's rows, stopping the query once `limit` rows are in.

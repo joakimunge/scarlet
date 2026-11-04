@@ -12,6 +12,7 @@ pub mod list;
 pub mod logo;
 pub mod menu;
 pub mod palette;
+pub mod privacy;
 pub mod row;
 pub mod text;
 pub mod theme;
@@ -84,6 +85,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
             logo_above(frame, rect);
         }
         Some(Overlay::Ask(prompt)) => prompt.render(frame, body),
+        Some(Overlay::Privacy(picker)) => picker.render(frame, body),
         Some(Overlay::Palette(palette)) => palette.render(frame, body),
         Some(Overlay::Value(view)) => view.render(frame, body),
         Some(Overlay::Row(view)) => view.render(frame, body),

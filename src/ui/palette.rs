@@ -20,6 +20,8 @@ pub enum Action {
     SwitchConnection,
     Query,
     Ask,
+    AskPrivacy,
+    AskSent,
     Reload,
     Help,
     Quit,

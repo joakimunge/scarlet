@@ -14,7 +14,10 @@ use tokio::{
     net::UnixStream,
 };
 
-use super::tools;
+use super::{
+    mask::{Masker, Visibility},
+    tools,
+};
 use crate::db::postgres::Session;
 
 pub enum Backend {
@@ -31,7 +34,10 @@ pub fn reply(result: Result<String, String>) -> Value {
     }
 }
 
-pub async fn serve(backend: Backend) -> Result<()> {
+/// Serves MCP on stdin/stdout. `visibility` decides how much of the data the
+/// client may see; with the bridge, Scarlet enforces it again on its side.
+pub async fn serve(backend: Backend, visibility: Visibility) -> Result<()> {
+    let masker = std::sync::Mutex::new(Masker::default());
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut stdout = tokio::io::stdout();
     let mut bridge = match &backend {
@@ -55,7 +61,7 @@ pub async fn serve(backend: Backend) -> Result<()> {
                 "serverInfo": {"name": "scarlet", "version": env!("CARGO_PKG_VERSION")},
             })),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tools::definitions(bridge.is_some())})),
+            "tools/list" => Ok(json!({"tools": tools::definitions(bridge.is_some(), visibility)})),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or_default().to_owned();
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
@@ -66,7 +72,9 @@ pub async fn serve(backend: Backend) -> Result<()> {
                         let line = replies.next_line().await?.context("Scarlet closed the bridge")?;
                         serde_json::from_str(&line)?
                     }
-                    (Backend::Direct(session), None) => reply(tools::call(session, &name, &arguments).await),
+                    (Backend::Direct(session), None) => {
+                        reply(tools::call(session, &name, &arguments, visibility, &masker).await)
+                    }
                     (Backend::Bridge(_), None) => unreachable!("the bridge connects first"),
                 };
                 Ok(json!({"content": [{"type": "text", "text": answer["text"]}], "isError": answer["is_error"]}))

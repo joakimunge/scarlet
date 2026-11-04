@@ -2001,6 +2001,7 @@ dependencies = [
  "nucleo-matcher",
  "postgres-native-tls",
  "ratatui",
+ "regex",
  "serde_json",
  "tokio",
  "tokio-postgres",

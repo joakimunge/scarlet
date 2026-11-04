@@ -58,6 +58,9 @@ rustup default alone.
   - Claude gets only Scarlet's tools: `--setting-sources ""`, `--strict-mcp-config`, `--tools ""`.
   - Tool calls come back through `scarlet mcp --bridge` to the running session.
   - `scarlet mcp <connection>` serves the same read-only tools standalone.
+  - `agent/mask.rs`: what Claude may see per database (masked by default, asked on first use) and the
+    masking itself. Answer rows never go back to Claude. Anything that can carry values to the agent
+    must pass through the `Masker`.
 
 ## Product rules
 

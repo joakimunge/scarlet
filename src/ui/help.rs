@@ -51,6 +51,7 @@ const SECTIONS: &[(&str, &[(&str, &str)])] = &[
         "Anywhere",
         &[
             ("a", "ask about the data in plain words"),
+            ("w", "what your last question sent to Claude"),
             ("ctrl+k", "jump to a table or run a command"),
             ("space", "what can be done here"),
             ("?", "this list"),

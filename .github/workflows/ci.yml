@@ -51,7 +51,7 @@ jobs:
         run: |
           psql -h localhost -U postgres -c 'CREATE DATABASE scarlet_dev'
           psql -h localhost -U postgres -d scarlet_dev -v ON_ERROR_STOP=1 -q -f dev/seed.sql
-      - run: cargo test --locked agent_queries -- --ignored
+      - run: cargo test --locked -- --ignored agent_queries renamed_columns
 
   msrv:
     name: Minimum Rust version

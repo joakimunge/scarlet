@@ -71,6 +71,7 @@ everything you can do where you are, and `?` lists every key.
 | `c` `y` / `Y` | copy the value / the row as JSON |
 | `r` | reload |
 | `a` | ask about the data in plain words |
+| `w` | what your last question sent to Claude |
 | `ctrl+k` | jump to any table or run a command |
 | `q`, `ctrl+c` | quit |
 
@@ -103,7 +104,29 @@ the SQL added to the editor under your question so you can change it and run it 
 - It runs Claude Code headless, signed in as you, with none of your own settings, plugins or tools.
   Set `SCARLET_MODEL` to pick another model (default: `sonnet`). `esc` stops it.
 
-`scarlet mcp` serves the same read-only tools to any MCP client. To use a database from Claude Code:
+#### Where your data goes
+
+Ask sends your question to Anthropic through your own Claude account, together with what Claude reads
+from the database. The first time you ask on a database, Scarlet asks how much Claude may see, and
+remembers it (`ctrl+p` in the question box changes it):
+
+- **Masked values** (recommended): Claude can look at values to get the details right, but emails,
+  names, phone numbers, addresses, ID and card numbers, IP addresses and secrets are replaced with
+  stand-ins like `‹email 3›` before they leave your computer. Columns are judged by name, type and
+  where a result column comes from, so renaming one in a query doesn't reveal it, and other text is
+  searched for emails, personal identity numbers, phone and card numbers. JSON is masked key by key.
+- **Table layout only**: table and column names, no values at all. Answers are a little less accurate.
+- **All values**: for your own test data.
+
+Whatever you choose, the rows of an answer never go to Claude; they only appear on your screen. `w`
+shows exactly what your last question sent. Masking is careful but not a guarantee: for real
+customer data, give Ask a database role that can only read what it should.
+
+Your Claude account's own settings decide what Anthropic keeps: on Pro and Max plans, check the
+privacy setting for model training; Team, Enterprise and API accounts are not used for training.
+
+`scarlet mcp` serves the same read-only tools to any MCP client, masked unless you pass
+`--values full` (or `--values schema`). To use a database from Claude Code:
 
 ```sh
 claude mcp add scarlet -- scarlet mcp postgres://localhost/shop

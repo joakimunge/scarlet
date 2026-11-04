@@ -22,7 +22,11 @@ use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{
-    agent, complete,
+    agent::{
+        self,
+        mask::{Masker, Visibility},
+    },
+    complete,
     connect::{Source, Target, discover},
     db::{
         Filter, Link, Relation, RelationKind, Row, Schema, TableInfo, View, ident, looks_like_condition,
@@ -39,6 +43,7 @@ use crate::{
         input::Input,
         menu::Menu,
         palette::{Action, Command, Palette},
+        privacy::PrivacyPicker,
         row::{Field, RowView},
         text,
         tree::Tree,
@@ -115,6 +120,7 @@ pub enum Overlay {
     Connect(ConnectPicker),
     Password(PasswordPrompt),
     Ask(AskPrompt),
+    Privacy(PrivacyPicker),
     Palette(Palette),
     Value(ValueView),
     Row(RowView),
@@ -165,6 +171,11 @@ pub struct Workspace {
     agent: Option<tokio::task::JoinHandle<()>>,
     /// The conversation follow-up questions continue.
     conversation: Option<String>,
+    /// Stand-ins for masked values, kept for the whole conversation.
+    masker: Arc<std::sync::Mutex<Masker>>,
+    /// The latest question, and what it sent to the agent.
+    asked: u64,
+    sent: Vec<(String, String)>,
 }
 
 impl Workspace {
@@ -674,6 +685,9 @@ impl App {
                     columns: HashMap::new(),
                     agent: None,
                     conversation: None,
+                    masker: Arc::default(),
+                    asked: 0,
+                    sent: Vec::new(),
                 });
                 self.load_catalog();
                 self.load_databases();
@@ -813,6 +827,7 @@ impl App {
             }
             Some(Overlay::Password(prompt)) => prompt.input.insert_str(text),
             Some(Overlay::Ask(prompt)) => prompt.input.insert_str(text),
+            Some(Overlay::Privacy(_)) => {}
             Some(Overlay::Palette(palette)) => {
                 palette.list.input.insert_str(text);
                 palette.refilter();
@@ -884,6 +899,7 @@ impl App {
             _ if is_ctrl(key, 'k') => self.open_palette(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             KeyCode::Char('a') => self.open_ask(),
+            KeyCode::Char('w') if !ws.sent.is_empty() => self.show_sent(),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab | KeyCode::BackTab => {
                 // Tables, then the editor in query mode, then the data.
@@ -1033,14 +1049,39 @@ impl App {
                     _ if is_ctrl(key, 'n') && prompt.follow_up => {
                         if let Some(ws) = &mut self.workspace {
                             ws.conversation = None;
+                            ws.masker = Arc::default();
                         }
                         prompt.follow_up = false;
+                    }
+                    _ if is_ctrl(key, 'p') => {
+                        let (database, current) = (prompt.database.clone(), prompt.visibility);
+                        return Some(Overlay::Privacy(PrivacyPicker::new(&database, Some(current), Some(prompt))));
                     }
                     _ => {
                         prompt.input.handle(key);
                     }
                 }
                 Some(Overlay::Ask(prompt))
+            }
+            Overlay::Privacy(mut picker) => {
+                match (key.code, nav(self.vim.as_ref(), key, pending_g)) {
+                    (KeyCode::Esc, _) => return picker.then.filter(|_| picker.had_choice).map(Overlay::Ask),
+                    (KeyCode::Enter, _) => {
+                        let choice = picker.choice();
+                        self.set_visibility(choice);
+                        return picker.then.map(|mut prompt| {
+                            prompt.visibility = choice;
+                            prompt.follow_up = self.workspace.as_ref().is_some_and(|ws| ws.conversation.is_some());
+                            Overlay::Ask(prompt)
+                        });
+                    }
+                    (_, Some(Nav::Up)) => picker.move_by(-1),
+                    (_, Some(Nav::Down)) => picker.move_by(1),
+                    _ if is_ctrl(key, 'p') => picker.move_by(-1),
+                    _ if is_ctrl(key, 'n') => picker.move_by(1),
+                    _ => {}
+                }
+                Some(Overlay::Privacy(picker))
             }
             Overlay::Password(mut prompt) => {
                 match key.code {
@@ -1397,6 +1438,9 @@ impl App {
             ],
         };
         items.push(("a".into(), "ask about the data".into()));
+        if !ws.sent.is_empty() {
+            items.push(("w".into(), "what was sent to Claude".into()));
+        }
         items.push(("ctrl+k".into(), "jump anywhere".into()));
         items.push(("?".into(), "every key".into()));
         let title = match (ws.focus, ws.grid()) {
@@ -1551,21 +1595,63 @@ impl App {
 
     // ---- asking -------------------------------------------------------------
 
+    /// The question box; the first time on a database, the choice of what Claude may see comes first.
     fn open_ask(&mut self) {
         let Some(ws) = &self.workspace else { return };
+        let saved = agent::mask::saved(&ws.target);
         let prompt = AskPrompt {
             input: Input::default(),
             follow_up: ws.conversation.is_some(),
             database: ws.target.database().to_owned(),
+            visibility: saved.unwrap_or(Visibility::Masked),
         };
-        self.overlay = Some(Overlay::Ask(prompt));
+        self.overlay = Some(match saved {
+            Some(_) => Overlay::Ask(prompt),
+            None => Overlay::Privacy(PrivacyPicker::new(ws.target.database(), None, Some(prompt))),
+        });
+    }
+
+    fn open_privacy(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let saved = agent::mask::saved(&ws.target);
+        self.overlay = Some(Overlay::Privacy(PrivacyPicker::new(ws.target.database(), saved, None)));
+    }
+
+    /// Saves what Claude may see of this database. A change starts a new
+    /// conversation, so nothing carries over from the old setting.
+    fn set_visibility(&mut self, visibility: Visibility) {
+        let Some(ws) = &mut self.workspace else { return };
+        if agent::mask::saved(&ws.target) != Some(visibility) {
+            agent::mask::save(&ws.target, visibility);
+            ws.conversation = None;
+            ws.masker = Arc::default();
+        }
+        self.toast(ToastKind::Info, format!("Ask: {}", visibility.label().to_lowercase()));
+    }
+
+    fn show_sent(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        if ws.sent.is_empty() {
+            return self.toast(ToastKind::Info, "Nothing has been sent to Claude yet");
+        }
+        let text: String = ws.sent.iter().map(|(heading, text)| format!("── {heading}\n\n{text}\n\n")).collect();
+        self.overlay = Some(Overlay::Value(ValueView::new(
+            "Sent to Claude".into(),
+            "your last question".into(),
+            Some(text.trim_end().to_owned()),
+        )));
     }
 
     /// Hands `question` to the agent. Its answer lands in the editor with its rows below.
     fn ask(&mut self, question: String) {
         let id = self.next_id();
-        let context = self.ask_context();
+        let Some(visibility) = self.workspace.as_ref().and_then(|ws| agent::mask::saved(&ws.target)) else {
+            return self.open_ask();
+        };
+        let context = self.ask_context(visibility);
         let Some(ws) = &mut self.workspace else { return };
+        ws.asked = id;
+        ws.sent.clear();
         if let Some(previous) = ws.agent.take() {
             previous.abort();
         }
@@ -1579,6 +1665,8 @@ impl App {
             context,
             conversation: ws.conversation.clone(),
             database: ws.target.database().to_owned(),
+            visibility,
+            masker: ws.masker.clone(),
         };
         let (tx, workspace) = (self.tx.clone(), ws.id);
         let (handle, conversation) = agent::spawn(ws.session.clone(), request, move |event| {
@@ -1589,7 +1677,8 @@ impl App {
     }
 
     /// What the user is looking at, in words, so a question can say "these".
-    fn ask_context(&self) -> Option<String> {
+    /// The row under the cursor is included only when values may be seen, masked if asked.
+    fn ask_context(&self, visibility: Visibility) -> Option<String> {
         let ws = self.workspace.as_ref()?;
         let grid = ws.grid()?;
         let mut context = match ws.mode {
@@ -1609,7 +1698,19 @@ impl App {
             }
             Mode::Query => format!("The user is looking at the result of:\n{}", ws.last_sql.as_deref()?),
         };
-        if let Some(row) = grid.row_json() {
+        // A filter or query can quote a value, such as an email address.
+        if visibility != Visibility::Full {
+            context = ws.masker.lock().unwrap().text(&context);
+        }
+        let row = grid.row_json().and_then(|row| match visibility {
+            Visibility::Schema => None,
+            Visibility::Masked => {
+                let json = serde_json::from_str(&row).ok()?;
+                Some(ws.masker.lock().unwrap().json(json).to_string())
+            }
+            Visibility::Full => Some(row),
+        });
+        if let Some(row) = row {
             let row: String = row.chars().take(2000).collect();
             context.push_str(&format!("\nThe row under their cursor: {row}"));
         }
@@ -1629,6 +1730,11 @@ impl App {
         let Some(ws) = self.workspace.as_mut().filter(|ws| ws.id == session) else { return };
         let asking = matches!(&ws.run, RunState::Asking { id: asking, .. } if *asking == id);
         match event {
+            agent::Event::Sent(heading, text) => {
+                if ws.asked == id {
+                    ws.sent.push((heading, text));
+                }
+            }
             agent::Event::Activity(text) => {
                 if let RunState::Asking { id: asking, activity, .. } = &mut ws.run
                     && *asking == id
@@ -1791,6 +1897,7 @@ impl App {
         }
         let actions = [
             ("Ask about the data", "a", Action::Ask),
+            ("What Ask can see", "", Action::AskPrivacy),
             ("SQL editor", "ctrl+e", Action::Query),
             ("Switch connection", "", Action::SwitchConnection),
             ("Reload tables", "", Action::Reload),
@@ -1799,6 +1906,13 @@ impl App {
         ];
         for (label, tag, action) in actions {
             commands.push(Command { label: label.into(), tag: tag.into(), action });
+        }
+        if !ws.sent.is_empty() {
+            commands.push(Command {
+                label: "What was sent to Claude".into(),
+                tag: "w".into(),
+                action: Action::AskSent,
+            });
         }
         self.overlay = Some(Overlay::Palette(Palette::new(commands)));
     }
@@ -1824,6 +1938,8 @@ impl App {
             Action::Follow(relation, view) => self.open_linked(relation, view),
             Action::Query => self.toggle_query(),
             Action::Ask => self.open_ask(),
+            Action::AskPrivacy => self.open_privacy(),
+            Action::AskSent => self.show_sent(),
             Action::Reload => self.load_catalog(),
             Action::Help => self.overlay = Some(Overlay::Help),
             Action::Quit => self.quit = true,
@@ -1842,9 +1958,17 @@ impl App {
             }
             Some(Overlay::Password(_)) => return pairs(&[("enter", "connect"), ("esc", "back")]),
             Some(Overlay::Ask(prompt)) if prompt.follow_up => {
-                return pairs(&[("enter", "ask"), ("ctrl+n", "new conversation"), ("esc", "close")]);
+                return pairs(&[
+                    ("enter", "ask"),
+                    ("ctrl+n", "new conversation"),
+                    ("ctrl+p", "what Claude sees"),
+                    ("esc", "close"),
+                ]);
             }
-            Some(Overlay::Ask(_)) => return pairs(&[("enter", "ask"), ("esc", "close")]),
+            Some(Overlay::Ask(_)) => {
+                return pairs(&[("enter", "ask"), ("ctrl+p", "what Claude sees"), ("esc", "close")]);
+            }
+            Some(Overlay::Privacy(_)) => return pairs(&[("↑↓", "choose"), ("enter", "use this"), ("esc", "cancel")]),
             Some(Overlay::Palette(_)) => return pairs(&[("↑↓", "select"), ("enter", "go"), ("esc", "close")]),
             Some(Overlay::Value(_)) => return pairs(&[("↑↓", "scroll"), ("c", "copy"), ("esc", "close")]),
             Some(Overlay::Row(_)) => return pairs(&[("↑↓", "scroll"), ("Y", "copy as JSON"), ("esc", "close")]),

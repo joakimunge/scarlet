@@ -39,14 +39,19 @@ enum Command {
         /// Used by Scarlet itself: pass tool calls to a running Scarlet.
         #[arg(long, hide = true, conflicts_with = "connection")]
         bridge: Option<PathBuf>,
+        /// What the client may see: masked values (personal data and secrets
+        /// replaced), the table layout only, or all values.
+        #[arg(long, default_value = "masked", value_parser = ["masked", "schema", "full"])]
+        values: String,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::Mcp { connection, bridge }) = cli.command {
-        return mcp(connection, bridge).await;
+    if let Some(Command::Mcp { connection, bridge, values }) = cli.command {
+        let visibility = agent::mask::Visibility::parse(&values).expect("checked by clap");
+        return mcp(connection, bridge, visibility).await;
     }
     let initial = cli.connection.as_deref().map(parse_target);
 
@@ -74,9 +79,9 @@ fn parse_target(input: &str) -> connect::Target {
     }
 }
 
-async fn mcp(connection: Option<String>, bridge: Option<PathBuf>) -> Result<()> {
+async fn mcp(connection: Option<String>, bridge: Option<PathBuf>, visibility: agent::mask::Visibility) -> Result<()> {
     if let Some(path) = bridge {
-        return agent::mcp::serve(agent::mcp::Backend::Bridge(path)).await;
+        return agent::mcp::serve(agent::mcp::Backend::Bridge(path), visibility).await;
     }
     let target = match connection {
         Some(input) => parse_target(&input),
@@ -87,5 +92,5 @@ async fn mcp(connection: Option<String>, bridge: Option<PathBuf>) -> Result<()> 
     let session = db::postgres::Session::connect(&target, |_| std::process::exit(1))
         .await
         .map_err(|e| anyhow!("{}: {}", target.database(), e.message))?;
-    agent::mcp::serve(agent::mcp::Backend::Direct(Arc::new(session))).await
+    agent::mcp::serve(agent::mcp::Backend::Direct(Arc::new(session)), visibility).await
 }
