@@ -2,6 +2,15 @@
 name = "scarlet"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "A fast, keyboard-driven terminal client for PostgreSQL"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joakimunge/scarlet"
+homepage = "https://github.com/joakimunge/scarlet"
+readme = "README.md"
+keywords = ["postgres", "tui", "database", "terminal", "sql"]
+categories = ["command-line-utilities", "database"]
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"
@@ -19,3 +28,7 @@ serde_json = { version = "1.0.154", features = ["preserve_order", "arbitrary_pre
 tokio = { version = "1.54.1", features = ["full"] }
 tokio-postgres = "0.7.18"
 unicode-width = "0.2.3"
+
+# Release binaries for Linux carry their own OpenSSL, so they run without it installed.
+[target.'cfg(target_os = "linux")'.dependencies]
+native-tls = { version = "0.2.18", features = ["vendored"] }

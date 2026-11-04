@@ -658,11 +658,13 @@ pub fn describe(e: &tokio_postgres::Error) -> String {
 mod tests {
     use super::*;
 
-    /// Needs the fixture database: `createdb scarlet_dev && psql -d scarlet_dev -f dev/seed.sql`.
+    /// Needs the fixture database: `createdb scarlet_dev && psql -d scarlet_dev -f dev/seed.sql`,
+    /// or a connection to it in `SCARLET_TEST_DATABASE`.
     #[tokio::test]
     #[ignore]
     async fn agent_queries_cannot_change_anything() {
-        let target = Target::parse("scarlet_dev", crate::connect::Source::Argument).unwrap();
+        let database = std::env::var("SCARLET_TEST_DATABASE").unwrap_or_else(|_| "scarlet_dev".into());
+        let target = Target::parse(&database, crate::connect::Source::Argument).unwrap();
         let session = Session::connect(&target, |_| {}).await.unwrap();
         let count = "SELECT count(*) FROM orders";
         let before = session.peek(count, 1).await.unwrap().rows;

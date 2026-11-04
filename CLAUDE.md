@@ -80,7 +80,8 @@ rustup default alone.
 ## Working rules
 
 - **Commit only when the user says "commit".** Ask before pushing, opening PRs or creating tickets.
-  The GitHub repo is `joakimunge/scarlet` (private).
+  The GitHub repo is `joakimunge/scarlet` (public), so nothing personal goes into files or commits:
+  commits use the GitHub noreply address, and examples use `example.com`.
 - **Never read or print secrets.** `.env` values and passwords are referred to by path or name only.
 - **Ask before non-obvious design choices.** Once the direction is clear, make small calls yourself
   and list them for veto.
@@ -113,3 +114,25 @@ rustup default alone.
   light and dark, and 256-colour (`env -u COLORTERM`) as well as 24-bit.
 - **Before handing over**, run `cargo fmt`, clippy with zero warnings, and `cargo test`. Report
   plainly what was checked and what couldn't be.
+
+## Releasing
+
+CI (`.github/workflows/ci.yml`) runs fmt, clippy, the tests on macOS and Linux, the database test
+against a Postgres service, and a build with the minimum Rust version.
+
+To release (only when the user asks):
+
+1. Bump `version` in `Cargo.toml`, run `cargo check` so `Cargo.lock` follows, and commit.
+2. Tag and push the tag:
+
+   ```sh
+   git tag v0.2.0 && git push origin v0.2.0
+   ```
+
+`.github/workflows/release.yml` then does the rest:
+- builds macOS (Apple silicon and Intel) and Linux (x86_64 and arm64) binaries
+- publishes them with checksums as a GitHub release
+- writes the formula with `dev/formula.sh` and pushes it to `joakimunge/homebrew-tap`, using the
+  `TAP_DEPLOY_KEY` secret (a deploy key that can write to that one repo)
+
+`install.sh` always installs the latest release.

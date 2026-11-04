@@ -2,6 +2,30 @@
 
 A fast, keyboard-only terminal client for PostgreSQL. Other databases will follow.
 
+## Install
+
+```sh
+brew install joakimunge/tap/scarlet
+```
+
+Or without Homebrew, on macOS or Linux (installs to `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/joakimunge/scarlet/main/install.sh | sh
+```
+
+Or from source, with Rust 1.88 or newer:
+
+```sh
+cargo install --git https://github.com/joakimunge/scarlet --locked
+```
+
+That's all it needs. For [Ask](#ask), which answers questions in plain language, also install
+[Claude Code](https://claude.com/code) and sign in once with `claude`. Ask uses your own Claude
+account; Scarlet never sees or stores your credentials.
+
+## Use
+
 ```sh
 scarlet                                  # .env, PG* variables or local discovery
 scarlet shop                             # a database on the local server
