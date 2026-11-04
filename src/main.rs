@@ -6,6 +6,7 @@ mod db;
 mod scratch;
 mod sql;
 mod ui;
+mod update;
 mod vimkeys;
 
 use std::io;
@@ -66,7 +67,13 @@ async fn main() -> Result<()> {
     let result = app::run(&mut terminal, initial).await;
     let _ = execute!(io::stdout(), DisableBracketedPaste);
     ratatui::restore();
-    result
+    if let Ok(app::Exit::Relaunch(program)) = &result {
+        // Start the updated version in this process's place, with the same arguments.
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(program).args(std::env::args_os().skip(1)).exec();
+        eprintln!("scarlet: updated, but could not start {}: {error}", program.display());
+    }
+    result.map(|_| ())
 }
 
 fn parse_target(input: &str) -> connect::Target {

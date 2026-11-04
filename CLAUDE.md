@@ -138,4 +138,6 @@ To release (only when the user asks):
 - writes the formula with `dev/formula.sh` and pushes it to `joakimunge/homebrew-tap`, using the
   `TAP_DEPLOY_KEY` secret (a deploy key that can write to that one repo)
 
-`install.sh` always installs the latest release.
+`install.sh` always installs the latest release. Scarlet itself notices new releases at start
+(`src/update.rs`) and can update the way it was installed (Homebrew, cargo or the script), then
+relaunches. Updates never touch shell startup files.

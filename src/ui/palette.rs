@@ -22,6 +22,7 @@ pub enum Action {
     Ask,
     AskPrivacy,
     AskSent,
+    Update,
     Reload,
     Help,
     Quit,

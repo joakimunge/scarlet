@@ -49,6 +49,7 @@ use crate::{
         tree::Tree,
         value::ValueView,
     },
+    update,
     vimkeys::{Motion, VimKeys},
 };
 
@@ -69,19 +70,70 @@ const HISTORY_LIMIT: usize = 50;
 pub enum Msg {
     Discovered(Vec<Target>),
     DiscoveryDone,
-    Connected { id: u64, target: Target, session: Arc<Session> },
-    ConnectFailed { id: u64, target: Target, error: ConnectError },
-    ConnectionLost { session: u64, error: String },
-    Catalog { session: u64, result: Result<Vec<Schema>, String> },
-    Databases { session: u64, names: Vec<String> },
-    Described { generation: u64, result: Result<TableInfo, String> },
-    Page { generation: u64, page: usize, result: Result<Vec<Row>, QueryError> },
-    Counted { generation: u64, result: Result<u64, String> },
+    Connected {
+        id: u64,
+        target: Target,
+        session: Arc<Session>,
+    },
+    ConnectFailed {
+        id: u64,
+        target: Target,
+        error: ConnectError,
+    },
+    ConnectionLost {
+        session: u64,
+        error: String,
+    },
+    Catalog {
+        session: u64,
+        result: Result<Vec<Schema>, String>,
+    },
+    Databases {
+        session: u64,
+        names: Vec<String>,
+    },
+    Described {
+        generation: u64,
+        result: Result<TableInfo, String>,
+    },
+    Page {
+        generation: u64,
+        page: usize,
+        result: Result<Vec<Row>, QueryError>,
+    },
+    Counted {
+        generation: u64,
+        result: Result<u64, String>,
+    },
     VimKeys(Option<VimKeys>),
-    Columns { session: u64, columns: HashMap<(String, String), Vec<(String, String)>> },
-    QueryDone { session: u64, id: u64, sql: String, result: Result<Outcome, RunError> },
-    Agent { session: u64, id: u64, event: agent::Event },
+    Columns {
+        session: u64,
+        columns: HashMap<(String, String), Vec<(String, String)>>,
+    },
+    QueryDone {
+        session: u64,
+        id: u64,
+        sql: String,
+        result: Result<Outcome, RunError>,
+    },
+    Agent {
+        session: u64,
+        id: u64,
+        event: agent::Event,
+    },
+    /// A newer release exists.
+    UpdateAvailable(String),
 }
+
+/// How the app ended.
+pub enum Exit {
+    Quit,
+    /// Updated: start this program again.
+    Relaunch(std::path::PathBuf),
+}
+
+/// How long the update notice stays in the corner.
+const UPDATE_NOTICE: Duration = Duration::from_secs(20);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
@@ -212,9 +264,13 @@ pub struct App {
     next_id: u64,
     pending_g: bool,
     started: Instant,
+    /// A newer release, and until when the notice about it shows.
+    pub update: Option<(String, Instant)>,
+    /// Set to update; the event loop does it, as it owns the terminal.
+    update_now: bool,
 }
 
-pub async fn run(terminal: &mut DefaultTerminal, initial: Option<Target>) -> Result<()> {
+pub async fn run(terminal: &mut DefaultTerminal, initial: Option<Target>) -> Result<Exit> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(tx, initial);
     let mut events = EventStream::new();
@@ -227,7 +283,7 @@ pub async fn run(terminal: &mut DefaultTerminal, initial: Option<Target>) -> Res
             event = events.next() => match event {
                 Some(Ok(event)) => app.on_event(event),
                 Some(Err(e)) => return Err(e.into()),
-                None => return Ok(()),
+                None => return Ok(Exit::Quit),
             },
             Some(msg) = rx.recv() => app.on_msg(msg),
             () = sleep, if deadline.is_some() => app.on_tick(),
@@ -243,9 +299,19 @@ pub async fn run(terminal: &mut DefaultTerminal, initial: Option<Target>) -> Res
             events = EventStream::new();
             app.external_edit_done(edited);
         }
+        if std::mem::take(&mut app.update_now) {
+            drop(events);
+            let method = update::Method::detect();
+            if suspended(terminal, || update::run(&method))? {
+                app.save_scratch();
+                return Ok(Exit::Relaunch(method.program().to_path_buf()));
+            }
+            events = EventStream::new();
+            app.toast(ToastKind::Error, "The update didn't finish");
+        }
         if app.quit {
             app.save_scratch();
-            return Ok(());
+            return Ok(Exit::Quit);
         }
     }
 }
@@ -381,7 +447,15 @@ impl App {
             next_id: 1,
             pending_g: false,
             started: Instant::now(),
+            update: None,
+            update_now: false,
         };
+        let tx = app.tx.clone();
+        tokio::spawn(async move {
+            if let Some(version) = update::newer_release().await {
+                let _ = tx.send(Msg::UpdateAvailable(version));
+            }
+        });
         let cwd = std::env::current_dir().unwrap_or_default();
         let dotenv = discover::dotenv_targets(&cwd);
         let env = discover::env_target();
@@ -432,6 +506,7 @@ impl App {
             self.workspace.as_ref().and_then(|ws| ws.preview_at),
             self.workspace.as_ref().and_then(|ws| ws.search_at),
             self.toast.as_ref().map(|t| t.until),
+            self.update.as_ref().map(|(_, until)| *until).filter(|until| *until > Instant::now()),
             self.animating().then(|| Instant::now() + SPINNER_INTERVAL),
         ];
         candidates.into_iter().flatten().min()
@@ -776,6 +851,7 @@ impl App {
             }
             Msg::QueryDone { session, id, sql, result } => self.query_done(session, id, sql, result),
             Msg::Agent { session, id, event } => self.agent_event(session, id, event),
+            Msg::UpdateAvailable(version) => self.update = Some((version, Instant::now() + UPDATE_NOTICE)),
             Msg::Counted { generation, result } => {
                 // A failed count (timeout) just leaves the estimate in place.
                 if let (Some(grid), Ok(n)) = (self.current_grid(generation), result) {
@@ -1914,6 +1990,10 @@ impl App {
                 action: Action::AskSent,
             });
         }
+        if let Some((version, _)) = &self.update {
+            let label = format!("Update Scarlet to {version}");
+            commands.insert(0, Command { label, tag: "new".into(), action: Action::Update });
+        }
         self.overlay = Some(Overlay::Palette(Palette::new(commands)));
     }
 
@@ -1940,6 +2020,7 @@ impl App {
             Action::Ask => self.open_ask(),
             Action::AskPrivacy => self.open_privacy(),
             Action::AskSent => self.show_sent(),
+            Action::Update => self.update_now = true,
             Action::Reload => self.load_catalog(),
             Action::Help => self.overlay = Some(Overlay::Help),
             Action::Quit => self.quit = true,

@@ -24,6 +24,13 @@ That's all it needs. For [Ask](#ask), which answers questions in plain language,
 [Claude Code](https://claude.com/code) and sign in once with `claude`. Ask uses your own Claude
 account; Scarlet never sees or stores your credentials.
 
+### Updating
+
+Scarlet checks for a new release each time it starts (one small request to GitHub, skipped when
+`SCARLET_NO_UPDATE_CHECK` is set). When there is one, a note in the corner says so, with the command
+for the way you installed it. `ctrl+k` → *Update Scarlet* runs that command for you and starts the new
+version where you left off.
+
 ## Use
 
 ```sh

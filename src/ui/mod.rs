@@ -94,7 +94,43 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         None => {}
     }
 
+    render_update_notice(frame, body, app);
     render_footer(frame, footer, app, spinner);
+}
+
+/// A newer release: a quiet box in the bottom corner with the way to get it.
+fn render_update_notice(frame: &mut Frame, area: Rect, app: &App) {
+    let Some((version, until)) = &app.update else { return };
+    if *until <= std::time::Instant::now() {
+        return;
+    }
+    let command = crate::update::command().to_owned();
+    let how = if app.workspace.is_some() { "ctrl+k → Update Scarlet, or run:" } else { "To update, run:" };
+    // Long lines wrap rather than cut: a command is no use half shown.
+    let room = area.width.saturating_sub(8).min(72) as usize;
+    let lines: Vec<(String, Style)> = [
+        (format!("Scarlet {version} is out. You have {}.", crate::update::CURRENT), Style::new()),
+        (how.to_owned(), theme::muted()),
+        (command, theme::accent()),
+    ]
+    .into_iter()
+    .flat_map(|(line, style)| text::wrap(&line, room).into_iter().map(move |l| (l, style)))
+    .collect();
+    let width = (lines.iter().map(|(l, _)| text::measure(l, 200)).max().unwrap_or(0) as u16 + 4).min(area.width);
+    let height = lines.len() as u16 + 2;
+    if area.height < height + 2 {
+        return;
+    }
+    let rect = Rect { x: area.right() - width, y: area.bottom() - height, width, height };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let title = Line::from(vec![Span::raw(" "), Span::styled("Update", theme::strong()), Span::raw(" ")]);
+    let block = Block::bordered().border_type(BorderType::Rounded).border_style(theme::accent()).title(title);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    for (i, (line, style)) in lines.iter().enumerate() {
+        let line = text::fit(line, inner.width.saturating_sub(2) as usize);
+        frame.buffer_mut().set_string(inner.x + 1, inner.y + i as u16, line, *style);
+    }
 }
 
 fn render_workspace(frame: &mut Frame, area: Rect, ws: &mut Workspace, spinner: &str) {
