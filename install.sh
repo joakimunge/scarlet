@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/joakimunge/scarlet/main/install.sh | sh
 #
 # SCARLET_INSTALL_DIR picks the folder (default ~/.local/bin); SCARLET_VERSION
-# picks a release such as v0.1.0 (default: the latest).
+# picks a release such as v0.1.0 (default: the latest). When the folder isn't on
+# PATH, it is added in your shell's startup file; SCARLET_NO_MODIFY_PATH=1 skips that.
 set -eu
 
 repo="joakimunge/scarlet"
@@ -57,6 +58,41 @@ install -m 755 "$tmp/scarlet-$target/scarlet" "$dir/scarlet"
 echo "Installed $("$dir/scarlet" --version) to $dir/scarlet"
 
 case ":$PATH:" in
-    *":$dir:"*) echo "Run: scarlet" ;;
-    *) echo "$dir is not on your PATH. Add it, for example: echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc" ;;
+    *":$dir:"*)
+        echo "Run: scarlet"
+        exit 0
+        ;;
 esac
+
+# Written with $HOME so the line stays right if the home folder moves.
+case "$dir" in
+    "$HOME"/*) shown="\$HOME/${dir#"$HOME"/}" ;;
+    *) shown="$dir" ;;
+esac
+if [ -n "${SCARLET_NO_MODIFY_PATH:-}" ]; then
+    echo "$dir is not on your PATH. Add it with: export PATH=\"$shown:\$PATH\""
+    exit 0
+fi
+case "$(basename "${SHELL:-sh}")" in
+    zsh) rc="${ZDOTDIR:-$HOME}/.zshrc" line="export PATH=\"$shown:\$PATH\"" ;;
+    bash) rc="$HOME/.bashrc" line="export PATH=\"$shown:\$PATH\"" ;;
+    fish) rc="$HOME/.config/fish/conf.d/scarlet.fish" line="fish_add_path \"$shown\"" ;;
+    *) rc="$HOME/.profile" line="export PATH=\"$shown:\$PATH\"" ;;
+esac
+mkdir -p "$(dirname "$rc")"
+if grep -qsF "$line" "$rc"; then
+    echo "$rc already adds $dir to your PATH."
+    echo "Open a new terminal and run: scarlet"
+    exit 0
+fi
+printf '\n# Added by the Scarlet installer\n%s\n' "$line" >> "$rc"
+# Login shells (every new macOS terminal) read .bash_profile, or .profile without it, not .bashrc.
+if [ "$rc" = "$HOME/.bashrc" ]; then
+    login="$HOME/.profile"
+    [ -f "$HOME/.bash_profile" ] && login="$HOME/.bash_profile"
+    if ! grep -qsF "$line" "$login"; then
+        printf '\n# Added by the Scarlet installer\n%s\n' "$line" >> "$login"
+    fi
+fi
+echo "Added $dir to your PATH in $rc."
+echo "Open a new terminal and run: scarlet"
