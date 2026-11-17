@@ -12,7 +12,7 @@ use super::{
     list::{Entry, FilterList},
     text, theme,
 };
-use crate::connect::{Target, is_url};
+use crate::connect::{Source, Target, is_url};
 
 #[derive(Default)]
 pub struct ConnectPicker {
@@ -31,7 +31,16 @@ pub struct Activity<'a> {
 impl ConnectPicker {
     /// Rebuilds the list from `targets`, keeping `keep` selected when given.
     pub fn refilter(&mut self, targets: &[Target], keep: Option<usize>) {
-        self.labels = targets.iter().map(|t| (t.database().to_owned(), t.address(), t.source.label())).collect();
+        // A saved server is known by the name it was saved under; its database moves to the detail.
+        self.labels = targets
+            .iter()
+            .map(|t| match &t.source {
+                Source::Postico { name, .. } => {
+                    (name.clone(), format!("{}  {}", t.database(), t.address()), "Postico".to_owned())
+                }
+                source => (t.database().to_owned(), t.address(), source.label()),
+            })
+            .collect();
         let haystacks: Vec<String> =
             self.labels.iter().map(|(db, address, source)| format!("{db} {address} {source}")).collect();
         self.list.refilter(&haystacks, keep);

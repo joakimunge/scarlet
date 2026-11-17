@@ -2002,6 +2002,7 @@ dependencies = [
  "postgres-native-tls",
  "ratatui",
  "regex",
+ "security-framework",
  "serde_json",
  "tokio",
  "tokio-postgres",

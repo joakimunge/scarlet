@@ -170,7 +170,7 @@ pub enum RunState {
 
 pub enum Overlay {
     Connect(ConnectPicker),
-    Password(PasswordPrompt),
+    Password(Box<PasswordPrompt>),
     Ask(AskPrompt),
     Privacy(PrivacyPicker),
     Palette(Palette),
@@ -459,7 +459,8 @@ impl App {
         let cwd = std::env::current_dir().unwrap_or_default();
         let dotenv = discover::dotenv_targets(&cwd);
         let env = discover::env_target();
-        app.add_targets(initial.iter().chain(&dotenv).chain(&env).cloned().collect());
+        let saved = crate::connect::postico::targets();
+        app.add_targets(initial.iter().chain(&dotenv).chain(&env).chain(&saved).cloned().collect());
         discover::spawn(app.tx.clone());
         let tx = app.tx.clone();
         tokio::spawn(async move {
@@ -581,6 +582,15 @@ impl App {
             let on_lost = move |error| {
                 let _ = lost.send(Msg::ConnectionLost { session: id, error });
             };
+            // A saved server's password comes from the Keychain, which may ask the user first.
+            let mut target = target;
+            if !target.has_password() {
+                let source = target.source.clone();
+                let saved = tokio::task::spawn_blocking(move || crate::connect::postico::saved_password(&source));
+                if let Some(password) = saved.await.ok().flatten() {
+                    target = target.with_password(&password);
+                }
+            }
             let msg = match Session::connect(&target, on_lost).await {
                 Ok(session) => Msg::Connected { id, target, session: Arc::new(session) },
                 Err(error) => Msg::ConnectFailed { id, target, error },
@@ -775,8 +785,11 @@ impl App {
                 if error.needs_password {
                     // A wrong password deserves a message; a missing one just needs asking.
                     let message = target.has_password().then(|| error.message.clone());
-                    self.overlay =
-                        Some(Overlay::Password(PasswordPrompt { target, input: Input::default(), error: message }));
+                    self.overlay = Some(Overlay::Password(Box::new(PasswordPrompt {
+                        target,
+                        input: Input::default(),
+                        error: message,
+                    })));
                     return;
                 }
                 match &mut self.overlay {

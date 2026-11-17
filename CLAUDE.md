@@ -49,6 +49,7 @@ rustup default alone.
   - CLI argument or bare database name
   - `.env` files up to the git root
   - `DATABASE_URL` / `PG*` variables and pgpass
+  - servers saved in Postico 2 (passwords read from the Keychain only at connect time)
   - Docker containers
   - local sockets and ports
 - `src/sql.rs` and `src/complete.rs`: tokenizer, statement detection and schema-aware completion.

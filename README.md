@@ -47,12 +47,15 @@ Scarlet looks for databases without any setup:
 2. Postgres URLs in `.env`, `.env.local`, `.env.development` and `.env.development.local`,
    from the current directory up to the project root.
 3. `DATABASE_URL`, or `PGHOST` / `PGPORT` / `PGDATABASE` / `PGUSER`.
-4. Running Docker containers that publish port 5432. Credentials come from the container's `POSTGRES_*` environment.
-5. Servers on this machine (Unix sockets and common ports), with every database they hold.
+4. Servers saved in Postico 2 (macOS), under their Postico names. Servers behind an SSH tunnel are
+   left out.
+5. Running Docker containers that publish port 5432. Credentials come from the container's `POSTGRES_*` environment.
+6. Servers on this machine (Unix sockets and common ports), with every database they hold.
 
 If exactly one connection comes from the command line or `.env`, Scarlet connects straight away.
 Otherwise, it opens a picker where you can search, or paste a URL. Passwords come from the URL,
-`PGPASSWORD` or `~/.pgpass`. If one is still needed, Scarlet asks for it.
+`PGPASSWORD`, `~/.pgpass` or, for Postico servers, the Keychain item Postico saved (macOS asks
+you to allow it once). If one is still needed, Scarlet asks for it.
 
 Unknown URL parameters (Prisma's `schema`, `connection_limit`, ...) are ignored. As in libpq,
 `sslmode=require` encrypts without verifying the certificate, and `verify-ca` / `verify-full` verify it.

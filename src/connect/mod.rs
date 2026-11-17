@@ -3,6 +3,7 @@
 
 pub mod discover;
 mod pgpass;
+pub mod postico;
 
 use std::{path::Path, time::Duration};
 
@@ -12,9 +13,19 @@ use tokio_postgres::config::{Config, Host, SslMode};
 pub enum Source {
     Argument,
     Pasted,
-    DotEnv { file: String, key: String },
+    DotEnv {
+        file: String,
+        key: String,
+    },
     Environment,
-    Docker { container: String },
+    Docker {
+        container: String,
+    },
+    /// A server saved in Postico, with where its password is kept in the Keychain.
+    Postico {
+        name: String,
+        keychain: Option<(String, String)>,
+    },
     Local,
 }
 
@@ -26,6 +37,7 @@ impl Source {
             Source::DotEnv { file, key } => format!("{file} {key}"),
             Source::Environment => "environment".into(),
             Source::Docker { container } => format!("docker {container}"),
+            Source::Postico { name, .. } => format!("Postico {name}"),
             Source::Local => "local".into(),
         }
     }
@@ -36,8 +48,9 @@ impl Source {
             Source::Argument | Source::Pasted => 0,
             Source::DotEnv { .. } => 1,
             Source::Environment => 2,
-            Source::Docker { .. } => 3,
-            Source::Local => 4,
+            Source::Postico { .. } => 3,
+            Source::Docker { .. } => 4,
+            Source::Local => 5,
         }
     }
 }
