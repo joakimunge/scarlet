@@ -6,7 +6,6 @@ rust-version = "1.88"
 description = "A fast, keyboard-driven terminal client for PostgreSQL"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joakimunge/scarlet"
-homepage = "https://github.com/joakimunge/scarlet"
 readme = "README.md"
 keywords = ["postgres", "tui", "database", "terminal", "sql"]
 categories = ["command-line-utilities", "database"]

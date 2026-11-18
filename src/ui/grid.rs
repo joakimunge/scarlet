@@ -672,15 +672,15 @@ impl Grid {
         // view is the exception and gets clipped.
         let mut visible = Vec::new();
         let mut x = data_x;
-        for c in self.col_offset..self.columns.len() {
-            if x + self.widths[c] > right {
+        for (c, &width) in self.widths.iter().enumerate().take(self.columns.len()).skip(self.col_offset) {
+            if x + width > right {
                 if visible.is_empty() {
                     visible.push((c, x as u16, right.saturating_sub(x)));
                 }
                 break;
             }
-            visible.push((c, x as u16, self.widths[c]));
-            x += self.widths[c] + GAP;
+            visible.push((c, x as u16, width));
+            x += width + GAP;
         }
         let more_right = visible.last().is_some_and(|&(c, _, _)| c + 1 < self.columns.len());
 
