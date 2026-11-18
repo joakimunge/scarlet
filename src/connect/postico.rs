@@ -86,6 +86,17 @@ fn server(json: &Value) -> Option<Target> {
     Some(Target::new(config, Source::Postico { name, keychain }, false))
 }
 
+/// The saved server called `name`, with its saved password when the Keychain gives it.
+pub fn named(name: &str) -> Option<Target> {
+    let target = targets()
+        .into_iter()
+        .find(|t| matches!(&t.source, Source::Postico { name: n, .. } if n.eq_ignore_ascii_case(name)))?;
+    if target.has_password() {
+        return Some(target);
+    }
+    Some(saved_password(&target.source).map_or_else(|| target.clone(), |p| target.with_password(&p)))
+}
+
 /// The password Postico saved for `source`, asking the Keychain (which may
 /// ask the user to allow it).
 #[cfg(target_os = "macos")]

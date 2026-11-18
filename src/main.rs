@@ -35,7 +35,7 @@ struct Cli {
 enum Command {
     /// Serve a database to AI agents over MCP (stdio), read-only.
     Mcp {
-        /// Connection URL, key=value string or database name; defaults like Scarlet's own.
+        /// Connection URL, key=value string, database name or Postico server name; defaults like Scarlet's own.
         connection: Option<String>,
         /// Used by Scarlet itself: pass tool calls to a running Scarlet.
         #[arg(long, hide = true, conflicts_with = "connection")]
@@ -91,7 +91,7 @@ async fn mcp(connection: Option<String>, bridge: Option<PathBuf>, visibility: ag
         return agent::mcp::serve(agent::mcp::Backend::Bridge(path), visibility).await;
     }
     let target = match connection {
-        Some(input) => parse_target(&input),
+        Some(input) => connect::postico::named(&input).unwrap_or_else(|| parse_target(&input)),
         None => connect::discover::env_target()
             .or_else(|| connect::discover::dotenv_targets(&std::env::current_dir().ok()?).into_iter().next())
             .ok_or_else(|| anyhow!("no database given: pass a connection, or set DATABASE_URL or PG* variables"))?,

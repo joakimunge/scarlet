@@ -143,6 +143,9 @@ privacy setting for model training; Team, Enterprise and API accounts are not us
 claude mcp add scarlet -- scarlet mcp postgres://localhost/shop
 ```
 
+A server saved in Postico works by its name (`scarlet mcp "Shop staging"`), with the password from
+the Keychain.
+
 ### Your vim keys
 
 If you use Neovim (LazyVim and friends included) or Vim, Scarlet asks your editor for its normal-mode
