@@ -81,6 +81,7 @@ everything you can do where you are, and `?` lists every key.
 | `c` `y` / `Y` | copy the value / the row as JSON |
 | `r` | reload |
 | `a` | ask about the data in plain words |
+| `d` | switch to another database on this server, or another server |
 | `w` | what your last question sent to Claude |
 | `ctrl+k` | jump to any table or run a command |
 | `q`, `ctrl+c` | quit |

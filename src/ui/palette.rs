@@ -17,6 +17,7 @@ pub enum Action {
     /// Open a relation showing particular rows, remembering where we came from.
     Follow(Relation, View),
     Database(String),
+    Switch,
     SwitchConnection,
     Query,
     Ask,

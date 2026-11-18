@@ -988,6 +988,7 @@ impl App {
             _ if is_ctrl(key, 'k') => self.open_palette(),
             KeyCode::Char('?') => self.overlay = Some(Overlay::Help),
             KeyCode::Char('a') => self.open_ask(),
+            KeyCode::Char('d') => self.open_switcher(),
             KeyCode::Char('w') if !ws.sent.is_empty() => self.show_sent(),
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -1527,6 +1528,7 @@ impl App {
             ],
         };
         items.push(("a".into(), "ask about the data".into()));
+        items.push(("d".into(), "switch database or server".into()));
         if !ws.sent.is_empty() {
             items.push(("w".into(), "what was sent to Claude".into()));
         }
@@ -1956,6 +1958,30 @@ impl App {
         }
     }
 
+    /// The other databases on this server, then the way to another server.
+    fn open_switcher(&mut self) {
+        let Some(ws) = &self.workspace else { return };
+        let mut commands: Vec<Command> = ws
+            .databases
+            .iter()
+            .filter(|d| d.as_str() != ws.target.database())
+            .map(|database| Command {
+                label: database.clone(),
+                tag: "database".into(),
+                action: Action::Database(database.clone()),
+            })
+            .collect();
+        if commands.is_empty() {
+            return self.run_action(Action::SwitchConnection);
+        }
+        commands.push(Command {
+            label: "Another server…".into(),
+            tag: String::new(),
+            action: Action::SwitchConnection,
+        });
+        self.overlay = Some(Overlay::Palette(Palette::with_placeholder(commands, "Switch database or server")));
+    }
+
     fn open_palette(&mut self) {
         let Some(ws) = &self.workspace else { return };
         let several_schemas = ws.tree.schemas.iter().filter(|s| !s.relations.is_empty()).count() > 1;
@@ -1988,7 +2014,7 @@ impl App {
             ("Ask about the data", "a", Action::Ask),
             ("What Ask can see", "", Action::AskPrivacy),
             ("SQL editor", "ctrl+e", Action::Query),
-            ("Switch connection", "", Action::SwitchConnection),
+            ("Switch database or server", "d", Action::Switch),
             ("Reload tables", "", Action::Reload),
             ("Keyboard shortcuts", "?", Action::Help),
             ("Quit", "q", Action::Quit),
@@ -2024,6 +2050,7 @@ impl App {
                 let target = ws.target.with_database(&name);
                 self.connect(target);
             }
+            Action::Switch => self.open_switcher(),
             Action::SwitchConnection => {
                 let current = self.workspace.as_ref().map(|ws| ws.target.clone());
                 self.open_picker(None, current.as_ref());
@@ -2106,6 +2133,7 @@ impl App {
                     ("/", "filter"),
                     ("a", "ask"),
                     ("ctrl+e", "sql"),
+                    ("d", "databases"),
                     ("ctrl+k", "jump"),
                 ]);
                 hints.push((leader, "more".into()));
